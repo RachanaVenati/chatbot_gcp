@@ -1,1 +1,7 @@
+streamlit
+python-dotenv
+openai
+tiktoken
+weaviate-client
+requests
 
