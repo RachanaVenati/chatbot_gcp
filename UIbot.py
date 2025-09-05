@@ -1,5 +1,6 @@
 import os
 import time
+import re
 import requests
 import streamlit as st
 from dotenv import load_dotenv
@@ -22,14 +23,17 @@ client = weaviate.connect_to_custom(
     grpc_secure=False
 )
 
-collection = client.collections.get("json_array_1")
+collection = client.collections.get("json_array_1")  # json_array_1 #god1
 
 # Token counter for logging
 def count_tokens(text):
-    enc = tiktoken.encoding_for_model("gpt-3.5-turbo")
+    text = "" if text is None else str(text)
+    try:
+        enc = tiktoken.encoding_for_model("gpt-3.5-turbo")
+    except Exception:
+        enc = tiktoken.get_encoding("cl100k_base")
     return len(enc.encode(text))
 
-# Get recent conversation
 def get_recent_conversation():
     history = st.session_state.chat_history[-10:]
     return "\n".join([
@@ -37,11 +41,9 @@ def get_recent_conversation():
         for role, msg in history if msg.strip()
     ])
 
-
-
 def llama_completion(prompt):
     response = openai.chat.completions.create(
-        model="gpt-3.5-turbo",  # Or "gpt-4" if you have access
+        model="gpt-3.5-turbo",
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": prompt}
@@ -50,7 +52,6 @@ def llama_completion(prompt):
     )
     return response.choices[0].message.content.strip()
 
-# Check if documents are sufficient
 def verify_documents(question, context):
     context = truncate_context_to_fit_tokens(context)
     prompt = (
@@ -59,7 +60,6 @@ def verify_documents(question, context):
     )
     return "yes" in llama_completion(prompt).lower()
 
-# Generate improved query
 def get_missing_info_query(question, context):
     context = truncate_context_to_fit_tokens(context)
     prompt = (
@@ -69,7 +69,6 @@ def get_missing_info_query(question, context):
     )
     return llama_completion(prompt)
 
-# Final answer generation
 def generate_response(question, context):
     context = truncate_context_to_fit_tokens(context)
     history = get_recent_conversation()
@@ -80,7 +79,6 @@ def generate_response(question, context):
     )
     return llama_completion(prompt)
 
-# Fallback response
 def fallback_general_response(question):
     history = get_recent_conversation()
     prompt = (
@@ -90,7 +88,6 @@ def fallback_general_response(question):
     )
     return llama_completion(prompt)
 
-# Truncate context to fit model token limits
 def truncate_context_to_fit_tokens(context, limit=2500):
     tokens = count_tokens(context)
     while tokens > limit:
@@ -98,7 +95,6 @@ def truncate_context_to_fit_tokens(context, limit=2500):
         tokens = count_tokens(context)
     return context
 
-# Log retrieval
 def log_retrievals(query, retrieved_docs, round_id, token_count):
     with open("retrieval_logs.txt", "a", encoding="utf-8") as f:
         f.write(f"\n=== Retrieval Round {round_id} ===\n")
@@ -109,13 +105,50 @@ def log_retrievals(query, retrieved_docs, round_id, token_count):
             f.write(f"\n--- Document {i} ---\nContent Snippet: {snippet}...\n")
         f.write("\n")
 
-# Retrieve context from Weaviate
 def retrieve_context(query, limit=8):
-    results = collection.query.near_text(
-        query=query,
-        limit=limit
-    )
-    return [obj.properties["text"] for obj in results.objects]
+    if not query or not query.strip():
+        return []
+
+    try:
+        results = collection.query.near_text(
+            query=query,
+            limit=limit,
+            # If available in your client version, this ensures the field is returned:
+            # return_properties=["content"]
+        )
+    except Exception as e:
+        print(f"Error retrieving context: {e}")
+        return []
+
+    docs = []
+    for obj in getattr(results, "objects", []) or []:
+        props = getattr(obj, "properties", {}) or {}
+        text = props.get("content") or props.get("text") or props.get("body") or props.get("chunk") or ""
+        # Coerce to string safely
+        if isinstance(text, list):
+            text = " ".join([str(t) for t in text if t is not None])
+        elif not isinstance(text, str):
+            text = "" if text is None else str(text)
+
+        if text.strip():
+            docs.append(text)
+
+    return docs
+
+# Detect chit-chat or acknowledgments
+ACKNOWLEDGMENT_PATTERNS = [
+    r"\bthanks?\b",
+    r"\bthank you\b",
+    r"\bok(ay)?\b",
+    r"\bthat'?s helpful\b",
+    r"\bgreat\b",
+    r"\bgood\b",
+    r"\bappreciate\b"
+]
+
+def is_acknowledgment(text):
+    text = text.lower()
+    return any(re.search(pattern, text) for pattern in ACKNOWLEDGMENT_PATTERNS)
 
 # Streamlit UI
 st.set_page_config(page_title="RAG Chatbot (OpenAI + Weaviate)", layout="centered")
@@ -151,26 +184,32 @@ if user_input:
     with st.chat_message("assistant", avatar="🤖"):
         msg_placeholder = st.empty()
         with st.spinner("Retrieving context and generating response..."):
-            query = user_input
-            final_context = ""
-            max_retries = 2
-            for i in range(max_retries):
-                docs = retrieve_context(query)
-                if not docs:
-                    break
-                context = "\n".join(docs)
-                log_retrievals(query, docs, i + 1, token_count=count_tokens(context))
-                if verify_documents(user_input, context):
-                    final_context = context
-                    break
-                else:
-                    query = get_missing_info_query(user_input, context)
-                    time.sleep(1.2)
 
-            if final_context:
-                full_answer = generate_response(user_input, final_context)
-            else:
+            if is_acknowledgment(user_input):
+                # ✅ Use OpenAI for conversational response
                 full_answer = fallback_general_response(user_input)
+            else:
+                query = user_input
+                final_context = ""
+                max_retries = 2
+                for i in range(max_retries):
+                    docs = retrieve_context(query)
+                    if not docs:
+                       full_answer= fallback_general_response(user_input)
+                    else:
+                        context = "\n".join(docs)
+                        log_retrievals(query, docs, i + 1, token_count=count_tokens(context))
+                    if verify_documents(user_input, context):
+                        final_context = context
+                        break
+                    else:
+                        query = get_missing_info_query(user_input, context)
+                        time.sleep(1.2)
+
+                if final_context:
+                    full_answer = generate_response(user_input, final_context)
+                else:
+                    full_answer = fallback_general_response(user_input)
 
         typed_text = ""
         for char in full_answer:
