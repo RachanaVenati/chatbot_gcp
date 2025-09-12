@@ -12,4 +12,4 @@ REM Install dependencies
 pip install streamlit openai tiktoken weaviate-client python-dotenv
 
 REM Run the Streamlit app
-streamlit run UIbot.py
+streamlit run voice_UIbot.py
